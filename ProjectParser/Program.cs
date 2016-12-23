@@ -24,12 +24,25 @@ namespace ProjectParser
             var browseForProjectFile = false;
             var projectOutputFile = "";
             var remove = "";
+            var inXmlFormat = false;
+            var outXmlFormat = false;
+            var useStdOut = false;
+            var useStdIn = false;
+            var xPathQuery = "";
+            var incrementBuildVersion = false;
+
             var options = new OptionSet
             {
                 {"b|browse", "Browse for project file to open", b => browseForProjectFile = b != null},
                 {"o|output=", "Write output to file", o => projectOutputFile = o },
-                {"r|remove=", "Remove file from setup project if it contains this string", r => remove = r },
-                {"h|help", "Show help", h => showHelp = h != null}
+                {"stdOut", "Write output to console", c => useStdOut = c != null },
+                {"stdIn", "Read input from StdIn", stdIn => useStdIn = stdIn != null },
+                {"xmlIn", "Read file in as XML", xi => inXmlFormat = xi != null },
+                {"xmlOut", "Write output as xml", xo => outXmlFormat = xo != null },
+                {"r|remove=", "Remove file from setup project if it's SourcePath contains this string", r => remove = r },
+                {"q=", "Return the value the XPath query", q => xPathQuery = q },
+                {"increment", "Increment the build version", i => incrementBuildVersion = i != null},
+                {"?|h|help", "Show help", h => showHelp = h != null},
             };
 
             List<string> extra;
@@ -53,7 +66,7 @@ namespace ProjectParser
             }
             
 
-            if (browseForProjectFile || String.IsNullOrWhiteSpace(projectFile))
+            if ((browseForProjectFile || String.IsNullOrWhiteSpace(projectFile)) && !useStdIn)
             {
                 OpenFileDialog ofd = new OpenFileDialog();
                 ofd.Title = "Select Project";
@@ -64,22 +77,75 @@ namespace ProjectParser
                 }
             }
 
-            if (File.Exists(projectFile))
+            XDocument doc = new XDocument();
+            if (useStdIn)
             {
-                var doc = ParseProject(projectFile);
-                if (!String.IsNullOrWhiteSpace(remove))
+                if (inXmlFormat)
                 {
-                    Remove(doc, remove);
+                    doc = XDocument.Load(Console.In);
                 }
-                if(!String.IsNullOrWhiteSpace(projectOutputFile))
+                else
+                {
+                    StreamReader sr = new StreamReader(Console.OpenStandardInput());
+                    doc = ParseProject(sr.ReadToEnd().Split(new[] { Environment.NewLine }, StringSplitOptions.None));
+                }
+                
+            } else if (File.Exists(projectFile))
+            {
+                doc = ParseProject(File.ReadAllLines(projectFile));
+            }
+
+            if(!String.IsNullOrWhiteSpace(remove))
+            {
+                Remove(doc, remove);
+            }
+
+            if (incrementBuildVersion)
+            {
+                var version = doc.XPathSelectElement("/DeployProject/Deployable/Product/ProductVersion");
+                var parts = version.Value.Split('.');
+                parts[parts.Length - 1] = (int.Parse(parts.Last()) + 1).ToString();
+                version.Value = String.Join(".", parts);
+            }
+
+            if (!String.IsNullOrWhiteSpace(xPathQuery))
+            {
+                var result = doc.XPathSelectElement(xPathQuery);
+                var value = result?.Value;
+                if (value?.IndexOf(":", StringComparison.Ordinal) > -1)
+                {
+                    value = value.Substring(value.IndexOf(":", StringComparison.Ordinal)+1);
+                }
+                Console.WriteLine(
+                    value);
+            }
+
+            if(!String.IsNullOrWhiteSpace(projectOutputFile))
+            {
+                if (outXmlFormat)
+                {
+                    doc.Save(File.OpenWrite(projectOutputFile));
+                }
+                else
                 {
                     File.WriteAllLines(projectOutputFile, CreateProjectFile(doc, 0));
-                    //foreach (var line in CreateProjectFile(doc, 0).Take(50))
-                    //{
-                    //    Console.WriteLine(line);
-                    //}
                 }
             }
+            if(useStdOut)
+            {
+                if(outXmlFormat)
+                {
+                    doc.Save(Console.Out);
+                }
+                else
+                {
+                    foreach(var line in CreateProjectFile(doc, 0))
+                    {
+                        Console.WriteLine(line);
+                    }
+                }
+            }
+
 
             if (Debugger.IsAttached)
             {
@@ -186,11 +252,15 @@ namespace ProjectParser
 
         public static XDocument ParseProject(string fileName)
         {
+            return ParseProject(File.ReadAllLines(fileName));
+        }
+
+        public static XDocument ParseProject(IEnumerable<string> lines)
+        {
             var doc = new XDocument();
-            var lines = File.ReadAllLines(fileName);
             var stack = new Stack<XContainer>();
             stack.Push(doc);
-            foreach (var line in lines)
+            foreach (var line in lines.Where(l => !String.IsNullOrWhiteSpace(l)))
             {
                 var current = stack.Peek();
                 if (line.Trim() == "{")
